@@ -135,6 +135,7 @@ type UpdateAccountRequest struct {
 type BulkUpdateAccountsRequest struct {
 	AccountIDs              []int64        `json:"account_ids" binding:"required,min=1"`
 	Name                    string         `json:"name"`
+	Notes                   *string        `json:"notes"`
 	ProxyID                 *int64         `json:"proxy_id"`
 	Concurrency             *int           `json:"concurrency"`
 	Priority                *int           `json:"priority"`
@@ -153,6 +154,13 @@ type CheckMixedChannelRequest struct {
 	Platform  string  `json:"platform" binding:"required"`
 	GroupIDs  []int64 `json:"group_ids"`
 	AccountID *int64  `json:"account_id"`
+}
+
+type BatchSetAccountStateRequest struct {
+	AccountIDs      []int64 `json:"account_ids" binding:"required,min=1"`
+	State           string  `json:"state" binding:"required,oneof=normal active inactive error rate_limited temp_unschedulable overloaded"`
+	Reason          string  `json:"reason"`
+	DurationMinutes int     `json:"duration_minutes"`
 }
 
 // AccountWithConcurrency extends Account with real-time concurrency info
@@ -225,6 +233,18 @@ func (h *AccountHandler) List(c *gin.Context) {
 		search = search[:100]
 	}
 	lite := parseBoolQueryWithDefault(c.Query("lite"), false)
+	userTZ := c.Query("timezone")
+
+	createdFrom, err := parseAccountListDateFilter(c.Query("created_from"), userTZ, false)
+	if err != nil {
+		response.BadRequest(c, "invalid created_from")
+		return
+	}
+	createdTo, err := parseAccountListDateFilter(c.Query("created_to"), userTZ, true)
+	if err != nil {
+		response.BadRequest(c, "invalid created_to")
+		return
+	}
 
 	var groupID int64
 	if groupIDStr := c.Query("group"); groupIDStr != "" {
@@ -244,7 +264,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 		}
 	}
 
-	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID)
+	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, createdFrom, createdTo)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -366,7 +386,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 		result[i] = item
 	}
 
-	etag := buildAccountsListETag(result, total, page, pageSize, platform, accountType, status, search, lite)
+	etag := buildAccountsListETag(result, total, page, pageSize, platform, accountType, status, search, createdFrom, createdTo, lite)
 	if etag != "" {
 		c.Header("ETag", etag)
 		c.Header("Vary", "If-None-Match")
@@ -384,6 +404,7 @@ func buildAccountsListETag(
 	total int64,
 	page, pageSize int,
 	platform, accountType, status, search string,
+	createdFrom, createdTo *time.Time,
 	lite bool,
 ) string {
 	payload := struct {
@@ -394,6 +415,8 @@ func buildAccountsListETag(
 		AccountType string                   `json:"type"`
 		Status      string                   `json:"status"`
 		Search      string                   `json:"search"`
+		CreatedFrom *time.Time               `json:"created_from,omitempty"`
+		CreatedTo   *time.Time               `json:"created_to,omitempty"`
 		Lite        bool                     `json:"lite"`
 		Items       []AccountWithConcurrency `json:"items"`
 	}{
@@ -404,6 +427,8 @@ func buildAccountsListETag(
 		AccountType: accountType,
 		Status:      status,
 		Search:      search,
+		CreatedFrom: createdFrom,
+		CreatedTo:   createdTo,
 		Lite:        lite,
 		Items:       items,
 	}
@@ -432,6 +457,26 @@ func ifNoneMatchMatched(ifNoneMatch, etag string) bool {
 		}
 	}
 	return false
+}
+
+func parseAccountListDateFilter(raw, userTZ string, endOfDay bool) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if t, err := timezone.ParseInUserLocation("2006-01-02", raw, userTZ); err == nil {
+		start := timezone.StartOfDayInUserLocation(t, userTZ)
+		if endOfDay {
+			v := timezone.StartOfDayInUserLocation(t.AddDate(0, 0, 1), userTZ).Add(-time.Nanosecond)
+			return &v, nil
+		}
+		return &start, nil
+	}
+	parsed, err := timezone.ParseInUserLocation(time.RFC3339, raw, userTZ)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
 // GetByID handles getting an account by ID
@@ -1319,6 +1364,7 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 	skipCheck := req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk
 
 	hasUpdates := req.Name != "" ||
+		req.Notes != nil ||
 		req.ProxyID != nil ||
 		req.Concurrency != nil ||
 		req.Priority != nil ||
@@ -1338,6 +1384,7 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 	result, err := h.adminService.BulkUpdateAccounts(c.Request.Context(), &service.BulkUpdateAccountsInput{
 		AccountIDs:            req.AccountIDs,
 		Name:                  req.Name,
+		Notes:                 req.Notes,
 		ProxyID:               req.ProxyID,
 		Concurrency:           req.Concurrency,
 		Priority:              req.Priority,
@@ -1359,6 +1406,37 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 			})
 			return
 		}
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+func (h *AccountHandler) BatchSetState(c *gin.Context) {
+	var req BatchSetAccountStateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	type batchSetAccountStateService interface {
+		BatchSetAccountState(ctx context.Context, input *service.BatchSetAccountStateInput) (*service.BatchSetAccountStateResult, error)
+	}
+
+	svc, ok := h.adminService.(batchSetAccountStateService)
+	if !ok {
+		response.Error(c, http.StatusServiceUnavailable, "Batch account state service unavailable")
+		return
+	}
+
+	result, err := svc.BatchSetAccountState(c.Request.Context(), &service.BatchSetAccountStateInput{
+		AccountIDs:      req.AccountIDs,
+		State:           req.State,
+		Reason:          req.Reason,
+		DurationMinutes: req.DurationMinutes,
+	})
+	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
@@ -1936,7 +2014,7 @@ func (h *AccountHandler) BatchRefreshTier(c *gin.Context) {
 	accounts := make([]*service.Account, 0)
 
 	if len(req.AccountIDs) == 0 {
-		allAccounts, _, err := h.adminService.ListAccounts(ctx, 1, 10000, "gemini", "oauth", "", "", 0)
+		allAccounts, _, err := h.adminService.ListAccounts(ctx, 1, 10000, "gemini", "oauth", "", "", 0, nil, nil)
 		if err != nil {
 			response.ErrorFrom(c, err)
 			return

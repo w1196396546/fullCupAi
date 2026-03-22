@@ -443,10 +443,10 @@ func (r *accountRepository) Delete(ctx context.Context, id int64) error {
 }
 
 func (r *accountRepository) List(ctx context.Context, params pagination.PaginationParams) ([]service.Account, *pagination.PaginationResult, error) {
-	return r.ListWithFilters(ctx, params, "", "", "", "", 0)
+	return r.ListWithFilters(ctx, params, "", "", "", "", 0, nil, nil)
 }
 
-func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64) ([]service.Account, *pagination.PaginationResult, error) {
+func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, createdFrom, createdTo *time.Time) ([]service.Account, *pagination.PaginationResult, error) {
 	q := r.client.Account.Query()
 
 	if platform != "" {
@@ -459,6 +459,8 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 		switch status {
 		case "rate_limited":
 			q = q.Where(dbaccount.RateLimitResetAtGT(time.Now()))
+		case "overloaded":
+			q = q.Where(dbaccount.OverloadUntilGT(time.Now()))
 		case "temp_unschedulable":
 			q = q.Where(dbpredicate.Account(func(s *entsql.Selector) {
 				col := s.C("temp_unschedulable_until")
@@ -478,6 +480,12 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 		q = q.Where(dbaccount.Not(dbaccount.HasAccountGroups()))
 	} else if groupID > 0 {
 		q = q.Where(dbaccount.HasAccountGroupsWith(dbaccountgroup.GroupIDEQ(groupID)))
+	}
+	if createdFrom != nil {
+		q = q.Where(dbaccount.CreatedAtGTE(*createdFrom))
+	}
+	if createdTo != nil {
+		q = q.Where(dbaccount.CreatedAtLTE(*createdTo))
 	}
 
 	total, err := q.Count(ctx)
@@ -1255,6 +1263,11 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	if updates.Name != nil {
 		setClauses = append(setClauses, "name = $"+itoa(idx))
 		args = append(args, *updates.Name)
+		idx++
+	}
+	if updates.Notes != nil {
+		setClauses = append(setClauses, "notes = $"+itoa(idx))
+		args = append(args, *updates.Notes)
 		idx++
 	}
 	if updates.ProxyID != nil {

@@ -313,6 +313,13 @@
                 <Icon name="upload" size="sm" />
                 <span class="text-xs">{{ t('keys.importToCcSwitch') }}</span>
               </button>
+              <button
+                @click="importToSpectrAi(row)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-purple-50 hover:text-purple-600 dark:hover:bg-purple-900/20 dark:hover:text-purple-400"
+              >
+                <Icon name="sparkles" size="sm" />
+                <span class="text-xs">{{ t('keys.importToSpectrAi') }}</span>
+              </button>
               <!-- Toggle Status Button -->
               <button
                 @click="toggleKeyStatus(row)"
@@ -1667,6 +1674,30 @@ const importToCcswitch = (row: ApiKey) => {
 
   // For other platforms, execute directly
   executeCcsImport(row, platform === 'gemini' ? 'gemini' : 'claude')
+}
+
+const importToSpectrAi = (row: ApiKey) => {
+  const baseUrl = publicSettings.value?.api_base_url || window.location.origin
+  const providerName = (publicSettings.value?.site_name || 'sub2api').trim() || 'sub2api'
+  const params = new URLSearchParams({
+    name: providerName,
+    adapterType: 'codex-appserver',
+    apiBaseUrl: baseUrl,
+    apiKey: row.key
+  })
+  const deeplink = `spectrai://provider/import?${params.toString()}`
+
+  try {
+    window.open(deeplink, '_self')
+
+    setTimeout(() => {
+      if (document.hasFocus()) {
+        appStore.showError(t('keys.spectrAiNotInstalled'))
+      }
+    }, 100)
+  } catch (error) {
+    appStore.showError(t('keys.spectrAiNotInstalled'))
+  }
 }
 
 const executeCcsImport = (row: ApiKey, clientType: 'claude' | 'gemini') => {

@@ -54,7 +54,7 @@ type AdminService interface {
 	ReplaceUserGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (*ReplaceUserGroupResult, error)
 
 	// Account management
-	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64) ([]Account, int64, error)
+	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, createdFrom, createdTo *time.Time) ([]Account, int64, error)
 	GetAccount(ctx context.Context, id int64) (*Account, error)
 	GetAccountsByIDs(ctx context.Context, ids []int64) ([]*Account, error)
 	CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error)
@@ -243,6 +243,7 @@ type UpdateAccountInput struct {
 type BulkUpdateAccountsInput struct {
 	AccountIDs     []int64
 	Name           string
+	Notes          *string
 	ProxyID        *int64
 	Concurrency    *int
 	Priority       *int
@@ -280,6 +281,21 @@ type ReplaceUserGroupResult struct {
 
 // BulkUpdateAccountsResult is the aggregated response for bulk updates.
 type BulkUpdateAccountsResult struct {
+	Success    int                       `json:"success"`
+	Failed     int                       `json:"failed"`
+	SuccessIDs []int64                   `json:"success_ids"`
+	FailedIDs  []int64                   `json:"failed_ids"`
+	Results    []BulkUpdateAccountResult `json:"results"`
+}
+
+type BatchSetAccountStateInput struct {
+	AccountIDs      []int64
+	State           string
+	Reason          string
+	DurationMinutes int
+}
+
+type BatchSetAccountStateResult struct {
 	Success    int                       `json:"success"`
 	Failed     int                       `json:"failed"`
 	SuccessIDs []int64                   `json:"success_ids"`
@@ -1451,9 +1467,9 @@ func (s *adminServiceImpl) ReplaceUserGroup(ctx context.Context, userID, oldGrou
 }
 
 // Account management implementations
-func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64) ([]Account, int64, error) {
+func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, createdFrom, createdTo *time.Time) ([]Account, int64, error) {
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
-	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID)
+	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID, createdFrom, createdTo)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1774,6 +1790,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			return nil, errors.New("rate_multiplier must be >= 0")
 		}
 	}
+	if input.Notes != nil {
+		input.Notes = normalizeAccountNotes(input.Notes)
+	}
 
 	// Prepare bulk updates for columns and JSONB fields.
 	repoUpdates := AccountBulkUpdate{
@@ -1782,6 +1801,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 	if input.Name != "" {
 		repoUpdates.Name = &input.Name
+	}
+	if input.Notes != nil {
+		repoUpdates.Notes = input.Notes
 	}
 	if input.ProxyID != nil {
 		repoUpdates.ProxyID = input.ProxyID
@@ -1831,6 +1853,161 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			}
 		}
 
+		entry.Success = true
+		result.Success++
+		result.SuccessIDs = append(result.SuccessIDs, accountID)
+		result.Results = append(result.Results, entry)
+	}
+
+	return result, nil
+}
+
+func (s *adminServiceImpl) BatchSetAccountState(ctx context.Context, input *BatchSetAccountStateInput) (*BatchSetAccountStateResult, error) {
+	if input == nil {
+		return &BatchSetAccountStateResult{}, nil
+	}
+	result := &BatchSetAccountStateResult{
+		SuccessIDs: make([]int64, 0, len(input.AccountIDs)),
+		FailedIDs:  make([]int64, 0, len(input.AccountIDs)),
+		Results:    make([]BulkUpdateAccountResult, 0, len(input.AccountIDs)),
+	}
+	if len(input.AccountIDs) == 0 {
+		return result, nil
+	}
+
+	state := strings.TrimSpace(input.State)
+	if state == "" {
+		return nil, errors.New("state is required")
+	}
+
+	clearRuntimeState := func(accountID int64) error {
+		if err := s.accountRepo.ClearRateLimit(ctx, accountID); err != nil {
+			return err
+		}
+		if err := s.accountRepo.ClearTempUnschedulable(ctx, accountID); err != nil {
+			return err
+		}
+		if err := s.accountRepo.ClearModelRateLimits(ctx, accountID); err != nil {
+			return err
+		}
+		if err := s.accountRepo.ClearAntigravityQuotaScopes(ctx, accountID); err != nil {
+			return err
+		}
+		return nil
+	}
+	updateStatus := func(account *Account, status string, errorMessage string) error {
+		account.Status = status
+		account.ErrorMessage = errorMessage
+		return s.accountRepo.Update(ctx, account)
+	}
+
+	now := time.Now()
+	until := now.Add(time.Duration(input.DurationMinutes) * time.Minute)
+	if input.DurationMinutes <= 0 {
+		switch state {
+		case "rate_limited", "overloaded":
+			until = now.Add(60 * time.Minute)
+		case "temp_unschedulable":
+			until = now.Add(30 * time.Minute)
+		}
+	}
+
+	for _, accountID := range input.AccountIDs {
+		entry := BulkUpdateAccountResult{AccountID: accountID}
+		account, err := s.accountRepo.GetByID(ctx, accountID)
+		if err != nil {
+			entry.Error = err.Error()
+			result.Failed++
+			result.FailedIDs = append(result.FailedIDs, accountID)
+			result.Results = append(result.Results, entry)
+			continue
+		}
+
+		switch state {
+		case "normal", StatusActive:
+			if err := updateStatus(account, StatusActive, ""); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			if err := clearRuntimeState(accountID); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+		case StatusDisabled:
+			if err := updateStatus(account, StatusDisabled, ""); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			if err := clearRuntimeState(accountID); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+		case StatusError:
+			reason := strings.TrimSpace(input.Reason)
+			if reason == "" {
+				reason = "Marked as error by admin"
+			}
+			if err := s.accountRepo.SetError(ctx, accountID, reason); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			if err := clearRuntimeState(accountID); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+		case "rate_limited":
+			if err := updateStatus(account, StatusActive, ""); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			if err := clearRuntimeState(accountID); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			if err := s.accountRepo.SetRateLimited(ctx, accountID, until); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+		case "temp_unschedulable":
+			if err := updateStatus(account, StatusActive, ""); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			if err := clearRuntimeState(accountID); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			reason := strings.TrimSpace(input.Reason)
+			if reason == "" {
+				reason = "Temporarily disabled by admin"
+			}
+			if err := s.accountRepo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+		case "overloaded":
+			if err := updateStatus(account, StatusActive, ""); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			if err := clearRuntimeState(accountID); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+			if err := s.accountRepo.SetOverloaded(ctx, accountID, until); err != nil {
+				entry.Error = err.Error()
+				break
+			}
+		default:
+			return nil, fmt.Errorf("unsupported state: %s", state)
+		}
+
+		if entry.Error != "" {
+			result.Failed++
+			result.FailedIDs = append(result.FailedIDs, accountID)
+			result.Results = append(result.Results, entry)
+			continue
+		}
 		entry.Success = true
 		result.Success++
 		result.SuccessIDs = append(result.SuccessIDs, accountID)

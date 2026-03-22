@@ -303,6 +303,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/account-batch-manager',
+    name: 'AdminAccountBatchManager',
+    component: () => import('@/views/admin/AccountBatchManagerView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Batch Account Manager',
+      titleKey: 'admin.accounts.batchManager.title',
+      descriptionKey: 'admin.accounts.batchManager.description'
+    }
+  },
+  {
     path: '/admin/announcements',
     name: 'AdminAnnouncements',
     component: () => import('@/views/admin/AnnouncementsView.vue'),

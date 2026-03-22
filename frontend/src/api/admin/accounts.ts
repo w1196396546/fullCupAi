@@ -37,6 +37,8 @@ export async function list(
     group?: string
     search?: string
     lite?: string
+    created_from?: string
+    created_to?: string
   },
   options?: {
     signal?: AbortSignal
@@ -69,6 +71,8 @@ export async function listWithEtag(
     group?: string
     search?: string
     lite?: string
+    created_from?: string
+    created_to?: string
   },
   options?: {
     signal?: AbortSignal
@@ -386,6 +390,28 @@ export async function bulkUpdate(
   return data
 }
 
+export async function batchSetState(request: {
+  account_ids: number[]
+  state: 'normal' | 'active' | 'inactive' | 'error' | 'rate_limited' | 'temp_unschedulable' | 'overloaded'
+  reason?: string
+  duration_minutes?: number
+}): Promise<{
+  success: number
+  failed: number
+  success_ids?: number[]
+  failed_ids?: number[]
+  results: Array<{ account_id: number; success: boolean; error?: string }>
+}> {
+  const { data } = await apiClient.post<{
+    success: number
+    failed: number
+    success_ids?: number[]
+    failed_ids?: number[]
+    results: Array<{ account_id: number; success: boolean; error?: string }>
+  }>('/admin/accounts/batch-set-state', request)
+  return data
+}
+
 /**
  * Get account today statistics
  * @param id - Account ID
@@ -651,6 +677,7 @@ export const accountsAPI = {
   batchCreate,
   batchUpdateCredentials,
   bulkUpdate,
+  batchSetState,
   previewFromCrs,
   syncFromCrs,
   exportData,

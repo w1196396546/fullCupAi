@@ -337,6 +337,7 @@ export default {
     groups: '分组管理',
     subscriptions: '订阅管理',
     accounts: '账号管理',
+    accountBatchManager: '账号批量管理',
     proxies: 'IP管理',
     redeemCodes: '兑换码',
     ops: '运维监控',
@@ -548,6 +549,7 @@ export default {
     copyToClipboard: '复制到剪贴板',
     copied: '已复制！',
     importToCcSwitch: '导入到 CCS',
+    importToSpectrAi: '导入到 SpectrAI',
     enable: '启用',
     disable: '禁用',
     nameLabel: '名称',
@@ -638,6 +640,8 @@ export default {
     ipRestrictionEnabled: '已配置 IP 限制',
     ccSwitchNotInstalled:
       'CC-Switch 未安装或协议处理程序未注册。请先安装 CC-Switch 或手动复制 API 密钥。',
+    spectrAiNotInstalled:
+      'SpectrAI 未安装或协议处理程序未注册。请先安装最新版 SpectrAI，或手动在 AI 模型页新建 Provider。',
     ccsClientSelect: {
       title: '选择客户端',
       description: '请选择您要导入到 CC-Switch 的客户端类型：',
@@ -2252,6 +2256,43 @@ export default {
         resetStatusSuccess: '已成功重置 {count} 个账号状态',
         refreshTokenSuccess: '已成功刷新 {count} 个账号令牌',
         partialSuccess: '操作部分完成：{success} 成功，{failed} 失败'
+      },
+      batchManager: {
+        title: '新增账号批量管理',
+        description: '集中处理新导入账号：按添加时间筛选、批量备注、批量设置状态、批量定时检测与可用性巡检。',
+        selectionInfo: '已选择 {count} 个账号',
+        selectCurrentPage: '选择当前页',
+        clearSelection: '清空选择',
+        reload: '刷新列表',
+        notesTitle: '批量备注',
+        notesHelp: '将输入的备注覆盖到当前选中的账号。',
+        notesPlaceholder: '例如：2026-03-21 新增账号',
+        applyNotes: '应用备注',
+        notesApplied: '备注处理完成：成功 {success} 个，失败 {failed} 个',
+        stateTitle: '批量设置状态',
+        stateHelp: '可快速将账号标记为正常、错误、限流、临时不可调度或过载。',
+        reasonPlaceholder: '可选：状态原因 / 错误说明',
+        durationMinutes: '持续分钟数',
+        applyState: '应用状态',
+        stateApplied: '状态处理完成：成功 {success} 个，失败 {failed} 个',
+        scheduleTitle: '批量设置定时检测',
+        scheduleHelp: '对所选账号创建或更新首个定时检测计划。已有计划时会直接更新第一条。',
+        modelPlaceholder: '可选：测试模型，留空使用默认模型',
+        cronPlaceholder: '例如：0 * * * *',
+        applySchedule: '应用定时任务',
+        scheduleApplied: '定时任务处理完成：成功 {success} 个，失败 {failed} 个',
+        availabilityTitle: '一键检测可用性',
+        availabilityHelp: '按顺序发起账号测试；测试失败的账号会自动转为错误状态。',
+        runAvailabilityCheck: '开始批量检测',
+        checkingProgress: '检测进度：{done}/{total}',
+        checkCompleted: '批量检测完成，共检测 {total} 个账号，全部可用。',
+        checkCompletedWithErrors: '批量检测完成，共检测 {total} 个账号，其中 {failed} 个异常。',
+        checkFailedAccountsMarkedError: '已将 {count} 个检测失败账号标记为错误状态',
+        checkRequestFailed: '批量检测失败，请稍后重试',
+        tableEmpty: '当前筛选条件下暂无账号',
+        columns: {
+          createdAt: '添加时间'
+        }
       },
       bulkEdit: {
         title: '批量编辑账号',
